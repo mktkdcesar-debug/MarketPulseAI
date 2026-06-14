@@ -1,0 +1,2 @@
+# MarketPulseAI
+AI Trading Assistant
