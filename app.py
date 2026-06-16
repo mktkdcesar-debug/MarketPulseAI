@@ -1,4 +1,5 @@
 import os
+import json
 import requests
 from flask import Flask, request
 from openai import OpenAI
@@ -6,12 +7,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 
-# Process multiple alerts simultaneously
 executor = ThreadPoolExecutor(max_workers=10)
 
-client = OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY")
-)
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -25,71 +23,126 @@ def send_telegram(message):
         json={
             "chat_id": TELEGRAM_CHAT_ID,
             "text": message
-        }
+        },
+        timeout=10
     )
 
 
-def process_alert(data):
+def get_value(data, key, default="N/A"):
+    return data.get(key, default)
+
+
+def ai_validate_trade(data):
+    signal = get_value(data, "signal")
+    ticker = get_value(data, "ticker")
+    price = get_value(data, "price")
+    daily = get_value(data, "dailyTrend")
+    hour = get_value(data, "hourTrend")
+    fifteen = get_value(data, "fifteenTrend")
+    setup = get_value(data, "setup")
+    buy_score = get_value(data, "buyScore")
+    short_score = get_value(data, "shortScore")
+    confidence = get_value(data, "confidence")
+    target = get_value(data, "target")
+    invalidation = get_value(data, "invalidation")
 
     prompt = f"""
-You are MarketPulse AI, an expert trading assistant.
+You are MarketPulse AI, a professional trading assistant.
 
-Analyse this TradingView alert:
+Validate this trade setup using only the data provided.
 
-{data}
+Signal: {signal}
+Ticker: {ticker}
+Price: {price}
+Daily Trend: {daily}
+1H Trend: {hour}
+15m Trend: {fifteen}
+Setup: {setup}
+Buy Score: {buy_score}
+Short Score: {short_score}
+System Confidence: {confidence}
+Target: {target}
+Invalidation: {invalidation}
 
-Reply in EXACTLY this format:
+Classify the trade as exactly one of:
+HIGH QUALITY
+MODERATE
+AVOID
 
-🟢 BUY NOW
-or
-🔴 SHORT NOW
+Reply in this exact format:
 
-Ticker:
-Price:
-
-📈 TREND ALIGNMENT
-Daily:
-1H:
-15m:
-
-⚡ Setup:
-
-📊 Buy Score:
-📊 Short Score:
-
-🔥 Confidence:
-
-🎯 Target:
-
+Validation:
 Reason:
-Maximum two short sentences explaining why the setup is attractive.
 
 Rules:
-
-- Keep the answer concise.
-- Sound like a professional trader.
+- The validation must be only HIGH QUALITY, MODERATE, or AVOID.
+- The reason must be maximum two short sentences.
 - Do not mention guarantees.
-- Do not mention probabilities.
-- No disclaimers.
-- Use emojis exactly as shown.
+- Do not give financial advice disclaimers.
+- Be strict. If trends conflict or scores are weak, choose MODERATE or AVOID.
 """
 
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        input=prompt
+    )
+
+    return response.output_text.strip()
+
+
+def process_alert(data):
     try:
+        signal = str(get_value(data, "signal")).upper()
+        ticker = get_value(data, "ticker")
+        price = get_value(data, "price")
+        daily = get_value(data, "dailyTrend")
+        hour = get_value(data, "hourTrend")
+        fifteen = get_value(data, "fifteenTrend")
+        setup = get_value(data, "setup")
+        buy_score = get_value(data, "buyScore")
+        short_score = get_value(data, "shortScore")
+        confidence = get_value(data, "confidence")
+        target = get_value(data, "target")
+        invalidation = get_value(data, "invalidation")
 
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=prompt
-        )
+        emoji = "🟢" if signal == "BUY" else "🔴"
 
-        ai_message = response.output_text
+        ai_result = ai_validate_trade(data)
 
-        send_telegram(ai_message)
+        message = f"""
+{emoji} {signal} NOW
+
+📌 {ticker} @ {price}
+
+📈 Trend Alignment
+Daily : {daily}
+1H    : {hour}
+15m   : {fifteen}
+
+⚡ Setup
+{setup}
+
+📊 Scores
+Buy   : {buy_score}/100
+Short : {short_score}/100
+
+🔥 System Confidence
+{confidence}
+
+🤖 AI Validation
+{ai_result}
+
+🎯 Target
+{target}
+
+🛑 Invalidation
+{invalidation}
+"""
+
+        send_telegram(message.strip())
 
     except Exception as e:
-
-        send_telegram(
-            f"⚠️ MarketPulse AI error\n\n{str(e)}"
-        )
+        send_telegram(f"⚠️ MarketPulse AI error\n\n{str(e)}")
 
 
 @app.route("/")
@@ -99,18 +152,18 @@ def home():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-
     data = request.get_json(silent=True)
 
     if data is None:
-        data = {
-            "raw_message": request.data.decode("utf-8")
-        }
+        raw_text = request.data.decode("utf-8")
 
-    # Process in background
+        try:
+            data = json.loads(raw_text)
+        except Exception:
+            data = {"raw_message": raw_text}
+
     executor.submit(process_alert, data)
 
-    # Reply immediately to TradingView
     return {"status": "accepted"}, 200
 
 
