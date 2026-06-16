@@ -256,6 +256,9 @@ def webhook():
         except Exception:
             data = {"raw_message": raw_text}
 
+    print("Received webhook data:")
+    print(data)
+
     executor.submit(process_alert, data)
 
     return {"status": "accepted", "version": "v5.0"}, 200
