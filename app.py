@@ -6,10 +6,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 
-# Allow multiple alerts to process simultaneously
+# Process multiple alerts simultaneously
 executor = ThreadPoolExecutor(max_workers=10)
 
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+client = OpenAI(
+    api_key=os.environ.get("OPENAI_API_KEY")
+)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -30,36 +32,50 @@ def send_telegram(message):
 def process_alert(data):
 
     prompt = f"""
-You are MarketPulse AI, a trading assistant.
+You are MarketPulse AI, an expert trading assistant.
 
 Analyse this TradingView alert:
 
 {data}
 
-Reply in this exact style:
+Reply in EXACTLY this format:
 
-🟢 BUY NOW or 🔴 SHORT NOW
+🟢 BUY NOW
+or
+🔴 SHORT NOW
 
 Ticker:
 Price:
-Daily Trend:
-1H Trend:
-15m Trend:
-Setup:
-Score:
-Target:
-Invalidation:
-Confidence: LOW / MEDIUM / HIGH
+
+📈 TREND ALIGNMENT
+Daily:
+1H:
+15m:
+
+⚡ Setup:
+
+📊 Buy Score:
+📊 Short Score:
+
+🔥 Confidence:
+
+🎯 Target:
 
 Reason:
-Short, clear explanation.
+Maximum two short sentences explaining why the setup is attractive.
 
-Important:
-Do not say it guarantees profit.
-Keep it practical for a trader.
+Rules:
+
+- Keep the answer concise.
+- Sound like a professional trader.
+- Do not mention guarantees.
+- Do not mention probabilities.
+- No disclaimers.
+- Use emojis exactly as shown.
 """
 
     try:
+
         response = client.responses.create(
             model="gpt-4.1-mini",
             input=prompt
@@ -70,12 +86,15 @@ Keep it practical for a trader.
         send_telegram(ai_message)
 
     except Exception as e:
-        send_telegram(f"⚠️ MarketPulse AI error:\n{str(e)}")
+
+        send_telegram(
+            f"⚠️ MarketPulse AI error\n\n{str(e)}"
+        )
 
 
 @app.route("/")
 def home():
-    return "MarketPulse AI Server Running"
+    return "MarketPulse AI Server Running 🚀"
 
 
 @app.route("/webhook", methods=["POST"])
@@ -88,7 +107,7 @@ def webhook():
             "raw_message": request.data.decode("utf-8")
         }
 
-    # Process alert in the background
+    # Process in background
     executor.submit(process_alert, data)
 
     # Reply immediately to TradingView
@@ -96,4 +115,7 @@ def webhook():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(
+        host="0.0.0.0",
+        port=8080
+    )
