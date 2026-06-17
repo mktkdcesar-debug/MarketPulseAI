@@ -2,7 +2,8 @@ import os
 import json
 import sqlite3
 import requests
-from datetime import datetime
+import yfinance as yf
+from datetime import datetime, timezone
 from flask import Flask, request
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor
@@ -39,6 +40,10 @@ def init_db():
             invalidation TEXT,
             ai_validation TEXT,
             ai_reason TEXT,
+            earnings_risk TEXT,
+            dividend_risk TEXT,
+            news_risk TEXT,
+            event_risk TEXT,
             raw_json TEXT
         )
     """)
@@ -50,10 +55,7 @@ def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     requests.post(
         url,
-        json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message
-        },
+        json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
         timeout=10
     )
 
@@ -62,7 +64,59 @@ def get_value(data, key, default="N/A"):
     return data.get(key, default)
 
 
-def ai_validate_trade(data):
+def check_market_events(ticker):
+    earnings_risk = "No earnings risk detected"
+    dividend_risk = "No dividend risk detected"
+    news_risk = "No major news risk detected"
+    event_risk = "LOW"
+
+    try:
+        stock = yf.Ticker(ticker)
+
+        # Earnings check
+        try:
+            cal = stock.calendar
+            if cal is not None and not cal.empty:
+                earnings_date = cal.index[0]
+                earnings_risk = f"Possible earnings date: {earnings_date}"
+                event_risk = "MEDIUM"
+        except Exception:
+            earnings_risk = "Earnings check unavailable"
+
+        # Dividend check
+        try:
+            divs = stock.dividends
+            if divs is not None and len(divs) > 0:
+                last_div_date = divs.index[-1].date()
+                dividend_risk = f"Last dividend recorded: {last_div_date}"
+        except Exception:
+            dividend_risk = "Dividend check unavailable"
+
+        # News check
+        try:
+            news = stock.news
+            if news and len(news) > 0:
+                latest_titles = []
+                for item in news[:3]:
+                    title = item.get("title", "")
+                    if title:
+                        latest_titles.append(title)
+
+                if latest_titles:
+                    news_risk = "Latest headlines checked"
+        except Exception:
+            news_risk = "News check unavailable"
+
+    except Exception:
+        earnings_risk = "Event data unavailable"
+        dividend_risk = "Event data unavailable"
+        news_risk = "Event data unavailable"
+        event_risk = "UNKNOWN"
+
+    return earnings_risk, dividend_risk, news_risk, event_risk
+
+
+def ai_validate_trade(data, earnings_risk, dividend_risk, news_risk, event_risk):
     signal = str(get_value(data, "signal")).upper()
     ticker = get_value(data, "ticker")
     price = get_value(data, "price")
@@ -77,7 +131,7 @@ def ai_validate_trade(data):
     invalidation = get_value(data, "invalidation")
 
     prompt = f"""
-You are MarketPulse AI v5.0, a strict professional trading assistant.
+You are MarketPulse AI v5.1, a strict professional trading assistant.
 
 Validate this trade setup using only the data provided.
 
@@ -94,6 +148,12 @@ System Confidence: {confidence}
 Target: {target}
 Invalidation: {invalidation}
 
+Event Checks:
+Earnings: {earnings_risk}
+Dividend: {dividend_risk}
+News: {news_risk}
+Overall Event Risk: {event_risk}
+
 Classify the trade as exactly one of:
 HIGH QUALITY
 MODERATE
@@ -108,6 +168,7 @@ Rules:
 - Be strict.
 - If trends conflict, choose MODERATE or AVOID.
 - If score is weak, choose MODERATE or AVOID.
+- If event risk is HIGH, downgrade the trade.
 - Do not mention guarantees.
 - Do not give financial advice disclaimers.
 """
@@ -131,7 +192,7 @@ Rules:
     return validation, reason
 
 
-def save_alert(data, validation, reason):
+def save_alert(data, validation, reason, earnings_risk, dividend_risk, news_risk, event_risk):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
 
@@ -152,11 +213,15 @@ def save_alert(data, validation, reason):
             invalidation,
             ai_validation,
             ai_reason,
+            earnings_risk,
+            dividend_risk,
+            news_risk,
+            event_risk,
             raw_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        datetime.utcnow().isoformat(),
+        datetime.now(timezone.utc).isoformat(),
         get_value(data, "ticker"),
         get_value(data, "signal"),
         str(get_value(data, "price")),
@@ -171,6 +236,10 @@ def save_alert(data, validation, reason):
         str(get_value(data, "invalidation")),
         validation,
         reason,
+        earnings_risk,
+        dividend_risk,
+        news_risk,
+        event_risk,
         json.dumps(data)
     ))
 
@@ -195,9 +264,25 @@ def process_alert(data):
 
         emoji = "🟢" if signal == "BUY" else "🔴"
 
-        validation, reason = ai_validate_trade(data)
+        earnings_risk, dividend_risk, news_risk, event_risk = check_market_events(ticker)
 
-        save_alert(data, validation, reason)
+        validation, reason = ai_validate_trade(
+            data,
+            earnings_risk,
+            dividend_risk,
+            news_risk,
+            event_risk
+        )
+
+        save_alert(
+            data,
+            validation,
+            reason,
+            earnings_risk,
+            dividend_risk,
+            news_risk,
+            event_risk
+        )
 
         message = f"""
 {emoji} {signal} NOW
@@ -222,6 +307,18 @@ Short : {short_score}/100
 🤖 AI Validation
 {validation}
 
+📰 News
+{news_risk}
+
+📅 Earnings
+{earnings_risk}
+
+💵 Dividend
+{dividend_risk}
+
+🚨 Event Risk
+{event_risk}
+
 📝 Reason
 {reason}
 
@@ -231,18 +328,18 @@ Short : {short_score}/100
 🛑 Invalidation
 {invalidation}
 
-💾 Saved to MarketPulse AI v5.0 database
+💾 Saved to MarketPulse AI v5.1 database
 """
 
         send_telegram(message.strip())
 
     except Exception as e:
-        send_telegram(f"⚠️ MarketPulse AI v5.0 error\n\n{str(e)}")
+        send_telegram(f"⚠️ MarketPulse AI v5.1 error\n\n{str(e)}")
 
 
 @app.route("/")
 def home():
-    return "MarketPulse AI v5.0 Running 🚀"
+    return "MarketPulse AI v5.1 Running 🚀"
 
 
 @app.route("/webhook", methods=["POST"])
@@ -261,7 +358,7 @@ def webhook():
 
     executor.submit(process_alert, data)
 
-    return {"status": "accepted", "version": "v5.0"}, 200
+    return {"status": "accepted", "version": "v5.1"}, 200
 
 
 @app.route("/stats")
@@ -288,13 +385,23 @@ def stats():
     """)
     ticker_rows = cur.fetchall()
 
+    cur.execute("""
+        SELECT setup, COUNT(*)
+        FROM alerts
+        GROUP BY setup
+        ORDER BY COUNT(*) DESC
+        LIMIT 10
+    """)
+    setup_rows = cur.fetchall()
+
     conn.close()
 
     return {
-        "version": "MarketPulse AI v5.0",
+        "version": "MarketPulse AI v5.1",
         "total_alerts": total,
         "validation_summary": validation_rows,
-        "top_tickers": ticker_rows
+        "top_tickers": ticker_rows,
+        "top_setups": setup_rows
     }
 
 
