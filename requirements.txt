@@ -1,5 +1,9 @@
+# MarketPulse AI v6.0 — Render Python service
+# Existing (keep whatever versions already work for you):
 flask
-openai
+openai>=1.0
 requests
-gunicorn
 yfinance
+# New in v6.0:
+apscheduler>=3.10
+gunicorn
