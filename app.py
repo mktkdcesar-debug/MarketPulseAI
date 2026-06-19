@@ -8,6 +8,12 @@ from flask import Flask, request
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor
 
+# --- MarketPulse AI v6.0 modules (additive) ---
+import mp_db
+import mp_tracker
+import mp_stats
+import mp_probability
+
 app = Flask(__name__)
 
 executor = ThreadPoolExecutor(max_workers=10)
@@ -16,7 +22,8 @@ client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-DB_FILE = "marketpulse_ai_v5.db"
+# v6.0: persistent-disk path (DATA_DIR); same file now also holds `trades`
+DB_FILE = mp_db.DB_PATH
 
 
 def init_db():
@@ -284,6 +291,9 @@ def process_alert(data):
             event_risk
         )
 
+        # v6.0: record signal into the statistical trades table
+        mp_db.record_signal(data, news_risk, event_risk)
+
         message = f"""
 {emoji} {signal} NOW
 
@@ -331,7 +341,9 @@ Short : {short_score}/100
 💾 Saved to MarketPulse AI v5.1 database
 """
 
-        send_telegram(message.strip())
+        # v6.0: append historical edge ('' until enough data exists)
+        message = message.strip() + mp_probability.telegram_block(data)
+        send_telegram(message)
 
     except Exception as e:
         send_telegram(f"⚠️ MarketPulse AI v5.1 error\n\n{str(e)}")
@@ -405,8 +417,17 @@ def stats():
     }
 
 
+@app.route("/stats/v6")
+def stats_v6():
+    return mp_stats.summary()
+
+
 if __name__ == "__main__":
     init_db()
+    mp_db.init_db()        # v6.0: create the trades table
+    mp_tracker.start()     # v6.0: start the background tracker
     app.run(host="0.0.0.0", port=8080)
 else:
     init_db()
+    mp_db.init_db()        # v6.0
+    mp_tracker.start()     # v6.0
